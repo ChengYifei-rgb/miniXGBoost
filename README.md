@@ -1,53 +1,128 @@
 # MiniXGBoost
 
-一个从零实现的现代 C++17 梯度提升树项目，用于学习 XGBoost 的核心算法，而不是官方库的包装器。
+[![CMake](https://github.com/ChengYifei-rgb/miniXGBoost/actions/workflows/cmake.yml/badge.svg)](https://github.com/ChengYifei-rgb/miniXGBoost/actions/workflows/cmake.yml)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C.svg)](https://isocpp.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 已实现功能
+MiniXGBoost is a dependency-free C++17 implementation of gradient-boosted
+decision trees. It implements the core ideas behind XGBoost instead of wrapping
+the official library, making the training process small enough to study while
+remaining useful as a tested CMake library.
 
-- 二阶梯度提升
-- 平方误差回归与二元逻辑分类
-- 精确贪心分裂搜索
-- L1/L2 正则化、`gamma` 与最小子节点权重
-- 最大深度和最小叶子样本数
-- 行采样、列采样
-- 缺失值默认方向学习
-- 并行特征分裂搜索（`std::async`）
-- 验证集监控与早停
-- 基于增益的特征重要性
-- 文本模型保存和加载
-- 自动化回归、分类及序列化测试
+## Highlights
 
-## 构建
+- Second-order gradient boosting for regression and binary classification
+- Exact greedy split search with learned default directions for missing values
+- L1/L2 regularization, gamma pruning, and minimum child weight
+- Row and column sampling with deterministic random seeds
+- Bounded parallel feature search controlled by `n_jobs`
+- Validation monitoring and early stopping
+- Gain-based feature importance
+- Portable text model serialization
+- Installable CMake target: `MiniXGBoost::minixgb`
+- Debug and Release CI on Linux, macOS, and Windows
 
-```powershell
+## How It Works
+
+Each boosting round computes first- and second-order derivatives of the loss,
+fits a regression tree to those statistics, and adds the scaled tree output to
+the current prediction. A candidate split is accepted only when its regularized
+gain is positive and both children satisfy the configured constraints.
+
+See [docs/algorithm.md](docs/algorithm.md) for the objective, leaf-weight, split
+gain, missing-value, and early-stopping details.
+
+## Build And Test
+
+Requirements: CMake 3.16+ and a C++17 compiler.
+
+```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
+cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-## 运行
+Disable optional targets when embedding the library:
 
-回归演示：
-
-```powershell
-.\build\minixgb_demo.exe
+```bash
+cmake -S . -B build \
+  -DMINIXGB_BUILD_DEMO=OFF \
+  -DMINIXGB_BUILD_TESTS=OFF
 ```
 
-分类演示：
+## Run The Demo
 
-```powershell
-.\build\minixgb_demo.exe classification
+```bash
+# Regression
+./build/minixgb_demo
+
+# Binary classification with missing feature values
+./build/minixgb_demo classification
 ```
 
-## 阅读顺序
+On a multi-config Windows generator, the executable is usually under
+`build/Release/`.
 
-1. `include/minixgb.hpp`：数据结构和公开接口。
-2. `src/minixgb.cpp` 中的 `leafWeight` 和 `splitGain`：数学核心。
-3. `Tree::findBestSplitForFeature`：精确贪心分裂。
-4. `Tree::buildNode`：递归建树。
-5. `Booster::fit`：逐轮添加树并更新梯度。
+## Library Example
 
-## 工程边界
+```cpp
+#include <minixgb.hpp>
 
-本项目完整覆盖单机内存版 XGBoost 的核心训练链路，但没有实现官方项目的直方图近似、分布式训练、GPU、稀疏页、外存训练和各语言绑定。那些属于工业扩展，不影响通过本项目学习二阶提升树的算法本质。
+int main() {
+    minixgb::Dataset train{
+        {{0.0, 1.0}, {1.0, 1.5}, {2.0, 3.0}, {3.0, 5.0}},
+        {0.0, 0.0, 1.0, 1.0}
+    };
 
+    minixgb::Params params;
+    params.objective = minixgb::Objective::BinaryLogistic;
+    params.n_estimators = 60;
+    params.max_depth = 3;
+    params.learning_rate = 0.1;
+    params.n_jobs = 4;
+    params.verbose = false;
+
+    minixgb::Booster model(params);
+    model.fit(train);
+
+    const double probability = model.predictOne({2.5, 4.0});
+    model.saveModel("classifier.mxgb");
+}
+```
+
+## Use From Another CMake Project
+
+Install MiniXGBoost:
+
+```bash
+cmake --install build --prefix ./install
+```
+
+Then consume the exported target:
+
+```cmake
+find_package(MiniXGBoost CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE MiniXGBoost::minixgb)
+```
+
+## Repository Layout
+
+```text
+include/minixgb.hpp       Public API
+src/minixgb.cpp           Training, prediction, and serialization
+src/main.cpp              Regression and classification demo
+tests/test_minixgb.cpp    Deterministic unit and integration tests
+docs/algorithm.md         Mathematical and implementation notes
+```
+
+## Scope
+
+MiniXGBoost focuses on the in-memory, single-machine learning algorithm. It does
+not implement histogram or approximate split finding, distributed training,
+GPU acceleration, sparse pages, external-memory training, or language bindings.
+For production workloads, use the official [XGBoost](https://github.com/dmlc/xgboost)
+project.
+
+## License
+
+MIT

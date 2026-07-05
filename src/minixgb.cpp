@@ -60,6 +60,16 @@ void Dataset::validate() const {
         if (row.size() != width) {
             throw std::invalid_argument("Every feature row must have equal width");
         }
+        for (double value : row) {
+            if (std::isinf(value)) {
+                throw std::invalid_argument("Feature values may be finite or NaN, but not infinite");
+            }
+        }
+    }
+    for (double label : y) {
+        if (!std::isfinite(label)) {
+            throw std::invalid_argument("Labels must be finite");
+        }
     }
 }
 
@@ -103,7 +113,11 @@ double softThreshold(double gradient, double alpha) {
 
 double leafWeight(double gradient_sum, double hessian_sum,
                   double lambda, double alpha) {
-    return -softThreshold(gradient_sum, alpha) / (hessian_sum + lambda);
+    const double denominator = hessian_sum + lambda;
+    if (denominator <= 0.0) {
+        return 0.0;
+    }
+    return -softThreshold(gradient_sum, alpha) / denominator;
 }
 
 double splitGain(double left_gradient, double left_hessian,
@@ -204,26 +218,56 @@ Tree::Split Tree::findBestSplit(const Matrix& x,
                                 const std::vector<double>& hessians,
                                 const std::vector<std::size_t>& rows,
                                 const std::vector<int>& features) const {
-    Split best;
+    const auto is_better = [](const Split& candidate, const Split& current) {
+        if (!candidate.valid) {
+            return false;
+        }
+        if (!current.valid || candidate.gain > current.gain + kEpsilon) {
+            return true;
+        }
+        if (std::abs(candidate.gain - current.gain) <= kEpsilon) {
+            if (candidate.feature != current.feature) {
+                return candidate.feature < current.feature;
+            }
+            if (candidate.threshold != current.threshold) {
+                return candidate.threshold < current.threshold;
+            }
+            return candidate.default_left && !current.default_left;
+        }
+        return false;
+    };
 
-    if (params_.n_jobs > 1 && features.size() > 1) {
+    Split best;
+    const std::size_t worker_count = std::min<std::size_t>(
+        static_cast<std::size_t>(params_.n_jobs), features.size());
+
+    if (worker_count > 1) {
         std::vector<std::future<Split>> jobs;
-        jobs.reserve(features.size());
-        for (int feature : features) {
-            jobs.push_back(std::async(std::launch::async, [&, feature] {
-                return findBestSplitForFeature(x, gradients, hessians, rows, feature);
+        jobs.reserve(worker_count);
+        for (std::size_t worker = 0; worker < worker_count; ++worker) {
+            jobs.push_back(std::async(std::launch::async, [&, worker] {
+                Split local_best;
+                for (std::size_t i = worker; i < features.size(); i += worker_count) {
+                    const Split candidate = findBestSplitForFeature(
+                        x, gradients, hessians, rows, features[i]);
+                    if (is_better(candidate, local_best)) {
+                        local_best = candidate;
+                    }
+                }
+                return local_best;
             }));
         }
         for (auto& job : jobs) {
-            Split candidate = job.get();
-            if (candidate.valid && (!best.valid || candidate.gain > best.gain)) {
+            const Split candidate = job.get();
+            if (is_better(candidate, best)) {
                 best = candidate;
             }
         }
     } else {
         for (int feature : features) {
-            Split candidate = findBestSplitForFeature(x, gradients, hessians, rows, feature);
-            if (candidate.valid && (!best.valid || candidate.gain > best.gain)) {
+            const Split candidate = findBestSplitForFeature(
+                x, gradients, hessians, rows, feature);
+            if (is_better(candidate, best)) {
                 best = candidate;
             }
         }
@@ -324,6 +368,9 @@ double Tree::predictRaw(const std::vector<double>& row) const {
     if (nodes_.empty()) {
         throw std::logic_error("Cannot predict with an empty tree");
     }
+    if (row.size() != feature_count_) {
+        throw std::invalid_argument("Prediction row has the wrong feature count");
+    }
     int node_id = 0;
     while (!nodes_[static_cast<std::size_t>(node_id)].is_leaf) {
         const Node& node = nodes_[static_cast<std::size_t>(node_id)];
@@ -376,10 +423,16 @@ void Booster::fit(const Dataset& train, const Dataset* validation) {
     }
 
     if (params_.objective == Objective::BinaryLogistic) {
-        for (double label : train.y) {
-            if (label != 0.0 && label != 1.0) {
-                throw std::invalid_argument("Binary labels must be exactly 0 or 1");
+        const auto validate_binary_labels = [](const Dataset& dataset) {
+            for (double label : dataset.y) {
+                if (label != 0.0 && label != 1.0) {
+                    throw std::invalid_argument("Binary labels must be exactly 0 or 1");
+                }
             }
+        };
+        validate_binary_labels(train);
+        if (validation != nullptr) {
+            validate_binary_labels(*validation);
         }
     }
 
@@ -452,6 +505,10 @@ void Booster::fit(const Dataset& train, const Dataset* validation) {
         if (params_.early_stopping_rounds > 0 &&
             rounds_without_improvement >= params_.early_stopping_rounds) {
             trees_.resize(best_tree_count);
+            train_history_.resize(best_tree_count);
+            if (validation != nullptr) {
+                validation_history_.resize(best_tree_count);
+            }
             if (params_.verbose) {
                 std::cout << "Early stopping at " << best_tree_count << " trees\n";
             }
@@ -536,6 +593,9 @@ std::vector<double> Booster::predict(const Matrix& x) const {
 std::vector<int> Booster::predictClass(const Matrix& x, double threshold) const {
     if (params_.objective != Objective::BinaryLogistic) {
         throw std::logic_error("predictClass requires BinaryLogistic objective");
+    }
+    if (!(threshold >= 0.0 && threshold <= 1.0)) {
+        throw std::invalid_argument("Classification threshold must be in [0, 1]");
     }
     const auto probabilities = predict(x);
     std::vector<int> classes(probabilities.size());
